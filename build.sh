@@ -13,6 +13,7 @@ cp "$PROJECT_DIR/Assets/MacBookDuo.png" "$CONTENTS_DIR/Resources/"
 cp "$PROJECT_DIR/Info.plist" "$CONTENTS_DIR/Info.plist"
 
 swiftc \
+  -target arm64-apple-macos15.0 \
   -parse-as-library \
   -O \
   -framework SwiftUI \
@@ -26,5 +27,7 @@ swiftc \
   -o "$MACOS_DIR/HingeGlass" \
   "$PROJECT_DIR"/Sources/*.swift
 
-codesign --force --deep --sign - "$APP_DIR"
+"$PROJECT_DIR/test.sh"
+codesign --force --deep --sign "${SIGNING_IDENTITY:--}" "$APP_DIR"
+codesign --verify --deep --strict "$APP_DIR"
 echo "Built: $APP_DIR"
