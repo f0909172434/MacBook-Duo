@@ -32,6 +32,7 @@ final class GlassMetalView: MTKView, MTKViewDelegate {
     var settled: Bool { abs(displayed - target) < 0.03 }
 
     func setLiveAngle(_ angle: Double) {
+        guard Float(angle) != target || !settled else { return }
         target = Float(angle)
         isPaused = false
     }

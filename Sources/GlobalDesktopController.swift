@@ -3,6 +3,13 @@ import ScreenCaptureKit
 import Carbon
 import CoreMedia
 
+// AppKit must not constrain this borderless overlay onto the main display.
+private final class DesktopGlassPanel: NSPanel {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        frameRect
+    }
+}
+
 // Capture and render are local only. No recordings or network output.
 @MainActor
 final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, SCStreamDelegate {
@@ -18,7 +25,8 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
     private var generation = 0
     private var starting = false
     private var startedAt = Date()
-    private var lastDelivery = Date()
+    private var captureFPS: Int32 = 30
+    private var updatingCaptureRate = false
     private var receivedFrame = false
     private var requestedVisible = false
     private var previewUntil = Date.distantPast
@@ -56,6 +64,7 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
             ("开启 / 停止全局效果   ⌘⇧G", #selector(toggle)),
             ("保存当前铰链终点   ⌘⇧K", #selector(calibrate)),
             ("打开设置   ⌘⇧Esc", #selector(showSetup)),
+            ("修复屏幕录制权限…", #selector(repairPermissions)),
             ("退出 MacBook Duo", #selector(quit))
         ] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
@@ -64,6 +73,26 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
         }
         statusItem.menu = menu
         registerKeys()
+        // Session activation notifications alone do not cover ordinary screen locking.
+        for (name, locked) in [("com.apple.screenIsLocked", true),
+                               ("com.apple.screenIsUnlocked", false)] {
+            observers.append(DistributedNotificationCenter.default().addObserver(
+                forName: Notification.Name(name), object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    if locked {
+                        self.sleepReasons.insert("lock")
+                        self.suspend(reason: "屏幕已锁定，解锁后自动恢复")
+                    } else {
+                        self.sleepReasons.remove("lock")
+                        self.recoveryFailures = 0
+                        self.nextRecoveryAttempt = .distantPast
+                        self.recoverIfReady()
+                    }
+                }
+            })
+        }
         for (name, key) in [(NSWorkspace.willSleepNotification, "system"),
                             (NSWorkspace.screensDidSleepNotification, "display"),
                             (NSWorkspace.sessionDidResignActiveNotification, "session")] {
@@ -126,6 +155,24 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
         NSApp.terminate(nil)
     }
 
+    @objc private func repairPermissions() {
+        let alert = NSAlert()
+        alert.messageText = "重置 MacBook Duo 的屏幕录制权限？"
+        alert.informativeText = "仅在授权异常时使用。将停止实时效果；重置后请退出并重新打开软件，再允许屏幕录制。不会修改其他应用的权限。"
+        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: "重置本应用权限")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        stop(reason: "正在修复录屏权限")
+        model.permissionsPreparing = true
+        Task { @MainActor in
+            let success = await ScreenCapturePermissionPreparation.reset(userConfirmed: true)
+            model.permissionsPreparing = false
+            model.globalStatus = success ? "权限已重置，请退出并重新打开软件后授权" : "重置失败，请在系统设置中检查屏幕录制权限"
+            statusLine.title = model.globalStatus
+        }
+    }
+
     func start(automatically: Bool = false) {
         guard !model.permissionsPreparing else { return }
         guard !starting && stream == nil else { return }
@@ -179,7 +226,7 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
                 config.capturesAudio = false
                 let renderer = self.renderer ?? GlassMetalView()
                 guard renderer.device != nil else { throw GlobalError.noGPU }
-                let overlay = (self.overlay as? NSPanel) ?? NSPanel(contentRect: screen.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+                let overlay = (self.overlay as? DesktopGlassPanel) ?? DesktopGlassPanel(contentRect: screen.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false, screen: screen)
                 overlay.hidesOnDeactivate = false
                 overlay.becomesKeyOnlyIfNeeded = true
                 overlay.isReleasedWhenClosed = false
@@ -202,11 +249,12 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
                 let stream = SCStream(filter: filter, configuration: config, delegate: self)
                 try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: .main)
                 self.stream = stream
+                captureFPS = 30
+                updatingCaptureRate = false
                 frameCount = 0
                 setupWindow?.orderOut(nil)
                 NSApp.presentationOptions = []
                 startedAt = Date()
-                lastDelivery = Date()
                 if !automatically { receivedFrame = false }
                 try await stream.startCapture()
                 guard token == generation else {
@@ -235,10 +283,10 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
                 self.stream = nil
                 starting = false
                 if let failedStream { Task { try? await failedStream.stopCapture() } }
-                if automatically && recoveryFailures < 3 {
+                if automatically || !sleepReasons.isEmpty {
                     recoveryFailures += 1
-                    nextRecoveryAttempt = Date().addingTimeInterval(Double(recoveryFailures))
-                    suspend(reason: "唤醒后正在重试（\(recoveryFailures)/3）：\(error.localizedDescription)")
+                    nextRecoveryAttempt = Date().addingTimeInterval(LiveEffectPolicy.retryDelay(failures: recoveryFailures))
+                    suspend(reason: "等待解锁或桌面捕获恢复：\(error.localizedDescription)")
                     return
                 }
                 stop(reason: "无法启动：\(error.localizedDescription)。请检查系统设置 → 隐私与安全性 → 屏幕录制权限。")
@@ -254,7 +302,7 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
         timer?.invalidate()
         timer = nil
         renderer?.isPaused = true
-        if sleepReasons.contains("session") { overlay?.orderOut(nil) }
+        overlay?.orderOut(nil)
         model.globalRunning = true
         model.globalStatus = reason
         statusLine?.title = reason
@@ -288,7 +336,8 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
         }
         // Wake recovery must never open a fresh permission prompt by itself.
         guard CGPreflightScreenCaptureAccess() else {
-            stop(reason: "屏幕录制权限不可用，请手动启用实时效果并允许权限")
+            nextRecoveryAttempt = Date().addingTimeInterval(5)
+            suspend(reason: "等待屏幕录制权限恢复；若权限已撤销，请到系统设置重新允许")
             return
         }
         start(automatically: true)
@@ -342,11 +391,15 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
             ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id
         }
         if screen == nil || screen!.frame != overlay.frame {
+            overlay.orderOut(nil)
+            generation += 1
+            starting = false
+            let oldStream = stream
+            stream = nil
+            receivedFrame = false
+            if let oldStream { Task { try? await oldStream.stopCapture() } }
             if let screen {
                 overlay.setFrame(screen.frame, display: false)
-                let oldStream = stream
-                stream = nil
-                if let oldStream { Task { try? await oldStream.stopCapture() } }
             }
             suspend(reason: "内建显示器变化，等待恢复实时效果")
         }
@@ -355,22 +408,35 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
     private func update() {
         guard sleepReasons.isEmpty else { return }
         guard let renderer, let overlay else { return }
+        guard let id = capturedDisplayID,
+              let targetScreen = NSScreen.screens.first(where: {
+                  ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id
+              }), CGDisplayIsBuiltin(id) != 0, CGDisplayIsActive(id) != 0 else {
+            screenConfigurationChanged()
+            suspend(reason: "等待 MacBook 内建屏幕恢复")
+            return
+        }
+        if overlay.frame != targetScreen.frame {
+            screenConfigurationChanged()
+            return
+        }
         if Date().timeIntervalSince(model.sensor.lastSuccessfulUpdate) > 2 {
             suspend(reason: "等待铰链数据恢复后自动继续")
             return
         }
         if !receivedFrame && Date().timeIntervalSince(startedAt) > 8 {
-            if recoveryFailures < 3 {
-                recoveryFailures += 1
-                suspend(reason: "等待唤醒后的桌面画面，正在重新连接")
-            } else {
-                stop(reason: "桌面捕获超时，已撤掉覆盖层；按 ⌘⇧G 重试")
-            }
+            let stalledStream = stream
+            stream = nil
+            if let stalledStream { Task { try? await stalledStream.stopCapture() } }
+            nextRecoveryAttempt = Date().addingTimeInterval(2)
+            suspend(reason: "等待唤醒后的桌面画面，正在重新连接")
             return
         }
         // A static desktop may legitimately produce no new complete frames.
         // Keep the last valid texture; explicit stream errors still stop immediately.
-        let remaining = Date() < previewUntil ? 0.35 : max(0, 1 - model.sensor.angle / model.openAngle)
+        let remaining = LiveEffectPolicy.remaining(angle: model.sensor.angle, velocity: model.sensor.velocity,
+                                                   endpoint: model.openAngle, preview: Date() < previewUntil)
+        updateCaptureRate(LiveEffectPolicy.captureFPS(remaining: remaining, velocity: model.sensor.velocity), screen: targetScreen)
         renderer.setLiveAngle(remaining * 80)
         // Hysteresis prevents overlay flicker near the calibrated endpoint.
         if remaining > 0.008 { requestedVisible = true }
@@ -390,7 +456,6 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard self.stream === stream, type == .screen, sampleBuffer.isValid else { return }
         guard sleepReasons.isEmpty else { return }
-        lastDelivery = Date()
         guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let raw = attachments.first?[.status] as? Int,
               SCFrameStatus(rawValue: raw) == .complete,
@@ -405,12 +470,35 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
         Task { @MainActor in
             guard self.stream === stream else { return }
             self.stream = nil
-            if recoveryFailures < 3 {
-                recoveryFailures += 1
-                suspend(reason: "捕获暂时中断，等待恢复：\(error.localizedDescription)")
-            } else {
-                stop(reason: "捕获恢复失败，请手动重新启用：\(error.localizedDescription)")
+            recoveryFailures += 1
+            nextRecoveryAttempt = Date().addingTimeInterval(LiveEffectPolicy.retryDelay(failures: recoveryFailures))
+            suspend(reason: "捕获暂时中断，解锁后自动重试：\(error.localizedDescription)")
+        }
+    }
+
+    private func updateCaptureRate(_ fps: Int32, screen: NSScreen) {
+        guard fps != captureFPS, !updatingCaptureRate, let stream else { return }
+        updatingCaptureRate = true
+        let config = SCStreamConfiguration()
+        config.width = Int(screen.frame.width)
+        config.height = Int(screen.frame.height)
+        config.pixelFormat = kCVPixelFormatType_32BGRA
+        config.minimumFrameInterval = CMTime(value: 1, timescale: fps)
+        config.queueDepth = 3
+        config.showsCursor = false
+        config.capturesAudio = false
+        Task { @MainActor in
+            do {
+                try await stream.updateConfiguration(config)
+                guard self.stream === stream else { return }
+                captureFPS = fps
+            } catch {
+                // Keep the functioning stream if a power-saving update fails.
+                guard self.stream === stream else { return }
+                captureFPS = fps
+                NSLog("Capture rate update failed: %@", error.localizedDescription)
             }
+            updatingCaptureRate = false
         }
     }
 
