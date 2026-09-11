@@ -1,0 +1,15 @@
+name: Build and test
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test
+        run: zsh build.sh
+      - name: Package development build
+        run: ditto -c -k --sequesterRsrc --keepParent "MacBook Duo.app" MacBook-Duo.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MacBook-Duo-development
+          path: MacBook-Duo.zip
