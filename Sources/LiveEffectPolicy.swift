@@ -12,6 +12,12 @@ enum LiveEffectPolicy {
         remaining > 0.008 || abs(velocity) > 2 ? 30 : 2
     }
     static func retryDelay(failures: Int) -> TimeInterval {
-        min(30, Double(max(1, failures)) * 2)
+        // A healthy capture may be interrupted as the display sleeps. Let the
+        // existing readiness checks retry its first failure on the next recovery
+        // tick instead of adding a fixed two-second delay after wake. Repeated
+        // failures retain the existing backoff; this does not bypass sleep,
+        // session, sensor, display, or screen-recording permission checks.
+        guard failures > 1 else { return 0 }
+        return min(30, Double(failures) * 2)
     }
 }

@@ -19,7 +19,20 @@ import Foundation
         precondition(E.captureFPS(remaining: 0, velocity: 0) == 2)
         precondition(E.captureFPS(remaining: 0.5, velocity: 0) == 30)
         precondition(E.captureFPS(remaining: 0, velocity: -20) == 30)
+        precondition(E.retryDelay(failures: 1) == 0, "A first interruption must not add two seconds to wake recovery")
+        precondition(E.retryDelay(failures: 0) == 0)
+        precondition(E.retryDelay(failures: -1) == 0)
+        precondition(E.retryDelay(failures: .min) == 0)
+        for failures in 2...16 {
+            precondition(E.retryDelay(failures: failures) == min(30, Double(failures) * 2),
+                         "Repeated capture failures must retain their bounded backoff")
+        }
         precondition(E.retryDelay(failures: 100) == 30)
+        precondition(E.retryDelay(failures: .max) == 30)
+        // Receiving a complete frame resets the controller's failure count;
+        // an interruption after that recovery is a first failure again.
+        let failureSequence = [1, 2, 3, 1]
+        precondition(failureSequence.map { E.retryDelay(failures: $0) } == [0, 4, 6, 0])
         print("PASS: permission safety, angle boundaries, prediction, capture budget, retry backoff")
     }
 }
