@@ -269,6 +269,7 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
                 stoppingForDormancy = false
                 wakingDormantCapture = false
                 dormantWakeRequested = false
+                model.sensor.setLowPowerPollingEnabled(false)
                 captureFPS = 30
                 updatingCaptureRate = false
                 frameCount = 0
@@ -441,6 +442,7 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
                 if dormantWakeRequested {
                     wakeDormantCapture()
                 } else {
+                    model.sensor.setLowPowerPollingEnabled(true)
                     NSLog("Global capture dormant while hinge is stable")
                 }
             } catch {
@@ -456,12 +458,14 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
 
     private func requestDormantCaptureWake() {
         guard captureDormant else { return }
+        model.sensor.setLowPowerPollingEnabled(false)
         dormantWakeRequested = true
         if !stoppingForDormancy { wakeDormantCapture() }
     }
 
     private func wakeDormantCapture() {
         guard captureDormant, !stoppingForDormancy, !wakingDormantCapture, let stream else { return }
+        model.sensor.setLowPowerPollingEnabled(false)
         dormantWakeRequested = false
         captureDormant = false
         wakingDormantCapture = true
@@ -497,6 +501,7 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
         stoppingForDormancy = false
         wakingDormantCapture = false
         dormantWakeRequested = false
+        model.sensor.setLowPowerPollingEnabled(false)
         overlay?.orderOut(nil)
         overlay = nil
         renderer = nil
@@ -627,6 +632,7 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
     nonisolated func stream(_ stream: SCStream, didStopWithError error: Error) {
         Task { @MainActor in
             guard self.stream === stream else { return }
+            model.sensor.setLowPowerPollingEnabled(false)
             self.stream = nil
             recoveryFailures += 1
             nextRecoveryAttempt = Date().addingTimeInterval(LiveEffectPolicy.retryDelay(failures: recoveryFailures))

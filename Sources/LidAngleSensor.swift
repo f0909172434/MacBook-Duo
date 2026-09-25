@@ -23,7 +23,10 @@ final class LidAngleSensor: ObservableObject {
     private var lastTime = CACurrentMediaTime()
     private var filteredVelocity = 0.0
     private var uiMotionUpdatesEnabled = false
+    private var lowPowerPollingEnabled = false
     private let noOptions = IOOptionBits(kIOHIDOptionsTypeNone)
+    private let activePollingInterval = 1.0 / 30.0
+    private let lowPowerPollingInterval = 1.0 / 20.0
 
     init() {
         discoverDevice()
@@ -55,12 +58,29 @@ final class LidAngleSensor: ObservableObject {
 
         isAvailable = true
         statusText = "您的设备支持铰链传感器"
-        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+        scheduleTimer()
+        poll()
+    }
+
+    func setLowPowerPollingEnabled(_ enabled: Bool) {
+        guard lowPowerPollingEnabled != enabled else { return }
+        lowPowerPollingEnabled = enabled
+        guard timer != nil else { return }
+        scheduleTimer()
+    }
+
+    private func scheduleTimer() {
+        timer?.invalidate()
+        let interval = lowPowerPollingEnabled ? lowPowerPollingInterval : activePollingInterval
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
         }
+        // Allow a little coalescing only while the renderer/capture path is
+        // already dormant. 20 Hz still bounds hinge-motion detection to one
+        // extra 50 ms polling interval in the power-saving state.
+        timer.tolerance = lowPowerPollingEnabled ? interval * 0.20 : 0
         self.timer = timer
         RunLoop.main.add(timer, forMode: .common)
-        poll()
     }
 
     func setUIMotionUpdatesEnabled(_ enabled: Bool) {
