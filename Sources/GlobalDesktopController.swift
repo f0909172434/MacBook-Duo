@@ -252,6 +252,7 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
                 captureFPS = 30
                 updatingCaptureRate = false
                 frameCount = 0
+                model.sensor.setUIMotionUpdatesEnabled(false)
                 setupWindow?.orderOut(nil)
                 NSApp.presentationOptions = []
                 startedAt = Date()
@@ -308,7 +309,7 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
         statusLine?.title = reason
         NSLog("Global suspended (resources retained): %@", reason)
         if recoveryTimer == nil {
-            let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            let timer = Timer(timeInterval: 0.125, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated { self?.recoverIfReady() }
             }
             recoveryTimer = timer
@@ -443,7 +444,9 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
         if remaining == 0 && renderer.settled { requestedVisible = false }
         if requestedVisible && receivedFrame && renderer.readyForDisplay {
             if !overlay.isVisible { overlay.orderFrontRegardless() }
-        } else { overlay.orderOut(nil) }
+        } else if overlay.isVisible {
+            overlay.orderOut(nil)
+        }
         statusTick += 1
         if statusTick % 30 == 0 {
             let state = overlay.isVisible ? "效果显示中" : "原桌面"

@@ -7,9 +7,10 @@ import QuartzCore
 /// can replace it later without changing the prototype's interaction model.
 @MainActor
 final class LidAngleSensor: ObservableObject {
-    @Published private(set) var angle = 105.0
+    private(set) var angle = 105.0
     private(set) var lastSuccessfulUpdate = Date.distantPast
-    @Published private(set) var velocity = 0.0
+    private(set) var velocity = 0.0
+    @Published private(set) var uiAngle = 105.0
     @Published private(set) var isAvailable = false
     @Published private(set) var statusText = "正在查找铰链传感器…"
 
@@ -20,6 +21,7 @@ final class LidAngleSensor: ObservableObject {
     private var lastAngle = 105.0
     private var lastTime = CACurrentMediaTime()
     private var filteredVelocity = 0.0
+    private var uiMotionUpdatesEnabled = false
     private let noOptions = IOOptionBits(kIOHIDOptionsTypeNone)
 
     init() {
@@ -58,6 +60,11 @@ final class LidAngleSensor: ObservableObject {
         self.timer = timer
         RunLoop.main.add(timer, forMode: .common)
         poll()
+    }
+
+    func setUIMotionUpdatesEnabled(_ enabled: Bool) {
+        uiMotionUpdatesEnabled = enabled
+        if enabled, uiAngle != angle { uiAngle = angle }
     }
 
     private func discoverDevice() {
@@ -144,6 +151,7 @@ final class LidAngleSensor: ObservableObject {
         angle = measured
         lastSuccessfulUpdate = Date()
         velocity = filteredVelocity
+        if uiMotionUpdatesEnabled { uiAngle = measured }
         lastAngle = measured
         lastTime = now
     }

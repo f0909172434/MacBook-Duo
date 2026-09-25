@@ -67,6 +67,7 @@ final class AppModel: ObservableObject {
 
     func startTest() {
         guard desktopImage != nil else { return }
+        sensor.setUIMotionUpdatesEnabled(true)
         controlsHidden = false
         withAnimation(.spring(response: 0.55, dampingFraction: 0.86)) {
             page = .test
@@ -74,6 +75,7 @@ final class AppModel: ObservableObject {
     }
 
     func returnToSetup() {
+        sensor.setUIMotionUpdatesEnabled(false)
         controlsHidden = false
         withAnimation(.easeInOut(duration: 0.3)) {
             page = .setup

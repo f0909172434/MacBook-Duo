@@ -198,7 +198,7 @@ private struct TestView: View {
     @State private var distance = 2.4
 
     private var angle: Double {
-        model.useSensor && sensor.isAvailable ? sensor.angle : model.simulatedAngle
+        model.useSensor && sensor.isAvailable ? sensor.uiAngle : model.simulatedAngle
     }
 
     var body: some View {
