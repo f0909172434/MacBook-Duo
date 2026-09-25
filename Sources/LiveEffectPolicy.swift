@@ -11,6 +11,9 @@ enum LiveEffectPolicy {
     static func captureFPS(remaining: Double, velocity: Double) -> Int32 {
         remaining > 0.008 || abs(velocity) > 2 ? 30 : 2
     }
+    static func canRenderRetainedWakeFrame(sleepReasons: Set<String>) -> Bool {
+        sleepReasons == ["system"]
+    }
     static func retryDelay(failures: Int) -> TimeInterval {
         // A healthy capture may be interrupted as the display sleeps. Let the
         // existing readiness checks retry its first failure on the next recovery

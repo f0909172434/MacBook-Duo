@@ -318,6 +318,14 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
     }
 
     private func recoverIfReady() {
+        // On some clamshell wake cycles the panel is already lit several
+        // seconds before macOS posts its full system-wake notification. The
+        // old capture is gone by then, but its last complete Metal texture is
+        // still valid. Animate that retained texture as soon as the display,
+        // session and hinge sensor are usable; a fresh capture replaces it
+        // after FullWake. Lock/session guards keep stale desktop content off
+        // security surfaces.
+        resumeRetainedWakeFrameIfReady()
         guard resumeWanted, sleepReasons.isEmpty, !starting,
               Date() >= nextRecoveryAttempt,
               !model.permissionsPreparing, model.sensor.isAvailable,
@@ -342,6 +350,26 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
             return
         }
         start(automatically: true)
+    }
+
+    private func resumeRetainedWakeFrameIfReady() {
+        guard LiveEffectPolicy.canRenderRetainedWakeFrame(sleepReasons: sleepReasons),
+              resumeWanted, !starting,
+              !model.permissionsPreparing, model.sensor.isAvailable,
+              Date().timeIntervalSince(model.sensor.lastSuccessfulUpdate) < 0.5,
+              receivedFrame, let renderer, renderer.readyForDisplay,
+              let overlay, let id = capturedDisplayID,
+              let screen = NSScreen.screens.first(where: {
+                  ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id
+              }), CGDisplayIsBuiltin(id) != 0, CGDisplayIsActive(id) != 0,
+              overlay.frame == screen.frame else { return }
+        let remaining = LiveEffectPolicy.remaining(angle: model.sensor.angle, velocity: model.sensor.velocity,
+                                                   endpoint: model.openAngle, preview: Date() < previewUntil)
+        guard remaining > 0.008 else { return }
+        requestedVisible = true
+        renderer.setLiveAngle(remaining * 80)
+        if timer == nil { resumeRendering() }
+        if !overlay.isVisible { overlay.orderFrontRegardless() }
     }
 
     private func resumeRendering() {
@@ -407,7 +435,12 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
     }
 
     private func update() {
-        guard sleepReasons.isEmpty else { return }
+        // Rendering a retained, already-captured texture is safe while the
+        // system-wake reason is still pending. Display/session/lock reasons
+        // continue to block the overlay entirely.
+        guard !sleepReasons.contains("display"),
+              !sleepReasons.contains("session"),
+              !sleepReasons.contains("lock") else { return }
         guard let renderer, let overlay else { return }
         guard let id = capturedDisplayID,
               let targetScreen = NSScreen.screens.first(where: {
@@ -437,7 +470,9 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
         // Keep the last valid texture; explicit stream errors still stop immediately.
         let remaining = LiveEffectPolicy.remaining(angle: model.sensor.angle, velocity: model.sensor.velocity,
                                                    endpoint: model.openAngle, preview: Date() < previewUntil)
-        updateCaptureRate(LiveEffectPolicy.captureFPS(remaining: remaining, velocity: model.sensor.velocity), screen: targetScreen)
+        if sleepReasons.isEmpty {
+            updateCaptureRate(LiveEffectPolicy.captureFPS(remaining: remaining, velocity: model.sensor.velocity), screen: targetScreen)
+        }
         renderer.setLiveAngle(remaining * 80)
         // Hysteresis prevents overlay flicker near the calibrated endpoint.
         if remaining > 0.008 { requestedVisible = true }
