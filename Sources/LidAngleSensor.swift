@@ -13,6 +13,7 @@ final class LidAngleSensor: ObservableObject {
     @Published private(set) var uiAngle = 105.0
     @Published private(set) var isAvailable = false
     @Published private(set) var statusText = "正在查找铰链传感器…"
+    var motionHandler: (() -> Void)?
 
     private var manager: IOHIDManager?
     private var device: IOHIDDevice?
@@ -148,11 +149,13 @@ final class LidAngleSensor: ObservableObject {
         let instantVelocity = (measured - lastAngle) / deltaTime
         filteredVelocity = filteredVelocity * 0.72 + instantVelocity * 0.28
 
+        let moved = abs(measured - lastAngle) >= 0.1
         angle = measured
         lastSuccessfulUpdate = Date()
         velocity = filteredVelocity
-        if uiMotionUpdatesEnabled { uiAngle = measured }
+        if uiMotionUpdatesEnabled, uiAngle != measured { uiAngle = measured }
         lastAngle = measured
         lastTime = now
+        if moved { motionHandler?() }
     }
 }

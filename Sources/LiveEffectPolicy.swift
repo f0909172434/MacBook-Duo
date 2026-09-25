@@ -14,6 +14,12 @@ enum LiveEffectPolicy {
     static func canRenderRetainedWakeFrame(sleepReasons: Set<String>) -> Bool {
         sleepReasons == ["system"]
     }
+    static func shouldEnterDormantCapture(remaining: Double, velocity: Double, settled: Bool,
+                                          overlayVisible: Bool, previewActive: Bool,
+                                          secondsSinceMotion: TimeInterval) -> Bool {
+        remaining == 0 && abs(velocity) <= 1 && settled && !overlayVisible && !previewActive
+            && secondsSinceMotion >= 0.35
+    }
     static func retryDelay(failures: Int) -> TimeInterval {
         // A healthy capture may be interrupted as the display sleeps. Let the
         // existing readiness checks retry its first failure on the next recovery

@@ -41,6 +41,11 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
     private var recoveryTimer: Timer?
     private var recoveryFailures = 0
     private var nextRecoveryAttempt = Date.distantPast
+    private var captureDormant = false
+    private var stoppingForDormancy = false
+    private var wakingDormantCapture = false
+    private var dormantWakeRequested = false
+    private var lastHingeMotionAt = CACurrentMediaTime()
     // The setup window is hidden during capture. After wake, on-screen content
     // may omit our process, but the SCApplication from this process remains valid.
     private var captureApplication: SCRunningApplication?
@@ -73,6 +78,9 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
         }
         statusItem.menu = menu
         registerKeys()
+        model.sensor.motionHandler = { [weak self] in
+            self?.hingeDidMove()
+        }
         // Session activation notifications alone do not cover ordinary screen locking.
         for (name, locked) in [("com.apple.screenIsLocked", true),
                                ("com.apple.screenIsUnlocked", false)] {
@@ -128,10 +136,18 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
     }
 
     @objc func preview() {
-        previewRequested = true
         if stream != nil {
             previewUntil = Date().addingTimeInterval(8)
-        } else { start() }
+            previewRequested = false
+            if captureDormant {
+                requestDormantCaptureWake()
+            } else if timer == nil {
+                resumeRendering()
+            }
+        } else {
+            previewRequested = true
+            start()
+        }
     }
 
     @objc private func toggle() {
@@ -249,6 +265,10 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
                 let stream = SCStream(filter: filter, configuration: config, delegate: self)
                 try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: .main)
                 self.stream = stream
+                captureDormant = false
+                stoppingForDormancy = false
+                wakingDormantCapture = false
+                dormantWakeRequested = false
                 captureFPS = 30
                 updatingCaptureRate = false
                 frameCount = 0
@@ -338,7 +358,15 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
             recoveryTimer?.invalidate()
             recoveryTimer = nil
             startedAt = Date()
-            resumeRendering()
+            if captureDormant {
+                let remaining = LiveEffectPolicy.remaining(angle: model.sensor.angle, velocity: model.sensor.velocity,
+                                                           endpoint: model.openAngle, preview: Date() < previewUntil)
+                if remaining > 0.008 || requestedVisible || overlay?.isVisible == true {
+                    requestDormantCaptureWake()
+                }
+            } else {
+                resumeRendering()
+            }
             model.globalStatus = "开盖继续显示 · 窗口与画面已保留"
             NSLog("Global resumed using existing stream and renderer")
             return
@@ -383,6 +411,80 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
         update()
     }
 
+    private func hingeDidMove() {
+        lastHingeMotionAt = CACurrentMediaTime()
+        guard resumeWanted else { return }
+        if !sleepReasons.isEmpty {
+            recoverIfReady()
+            return
+        }
+        if captureDormant {
+            requestDormantCaptureWake()
+        } else if timer == nil {
+            resumeRendering()
+        }
+    }
+
+    private func enterDormantCapture() {
+        guard !captureDormant, !stoppingForDormancy, !wakingDormantCapture, let stream else { return }
+        captureDormant = true
+        stoppingForDormancy = true
+        dormantWakeRequested = false
+        timer?.invalidate()
+        timer = nil
+        renderer?.isPaused = true
+        Task { @MainActor in
+            do {
+                try await stream.stopCapture()
+                guard self.stream === stream, captureDormant else { return }
+                stoppingForDormancy = false
+                if dormantWakeRequested {
+                    wakeDormantCapture()
+                } else {
+                    NSLog("Global capture dormant while hinge is stable")
+                }
+            } catch {
+                guard self.stream === stream else { return }
+                captureDormant = false
+                stoppingForDormancy = false
+                dormantWakeRequested = false
+                NSLog("Failed to enter dormant capture: %@", error.localizedDescription)
+                resumeRendering()
+            }
+        }
+    }
+
+    private func requestDormantCaptureWake() {
+        guard captureDormant else { return }
+        dormantWakeRequested = true
+        if !stoppingForDormancy { wakeDormantCapture() }
+    }
+
+    private func wakeDormantCapture() {
+        guard captureDormant, !stoppingForDormancy, !wakingDormantCapture, let stream else { return }
+        dormantWakeRequested = false
+        captureDormant = false
+        wakingDormantCapture = true
+        receivedFrame = false
+        startedAt = Date()
+        Task { @MainActor in
+            do {
+                try await stream.startCapture()
+                guard self.stream === stream else { return }
+                wakingDormantCapture = false
+                captureFPS = 30
+                NSLog("Global dormant capture restarted")
+            } catch {
+                guard self.stream === stream else { return }
+                wakingDormantCapture = false
+                self.stream = nil
+                recoveryFailures += 1
+                nextRecoveryAttempt = Date().addingTimeInterval(LiveEffectPolicy.retryDelay(failures: recoveryFailures))
+                suspend(reason: "等待桌面捕获从节能状态恢复：\(error.localizedDescription)")
+            }
+        }
+    }
+
     func stop(reason: String, preserveIntent: Bool = false) {
         if !preserveIntent {
             resumeWanted = false
@@ -391,6 +493,10 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
         }
         generation += 1
         starting = false
+        captureDormant = false
+        stoppingForDormancy = false
+        wakingDormantCapture = false
+        dormantWakeRequested = false
         overlay?.orderOut(nil)
         overlay = nil
         renderer = nil
@@ -482,6 +588,15 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
         } else if overlay.isVisible {
             overlay.orderOut(nil)
         }
+        if sleepReasons.isEmpty, captureFPS == 2,
+           LiveEffectPolicy.shouldEnterDormantCapture(
+               remaining: remaining, velocity: model.sensor.velocity, settled: renderer.settled,
+               overlayVisible: overlay.isVisible, previewActive: Date() < previewUntil,
+               secondsSinceMotion: CACurrentMediaTime() - lastHingeMotionAt
+           ) {
+            enterDormantCapture()
+            return
+        }
         statusTick += 1
         if statusTick % 30 == 0 {
             let state = overlay.isVisible ? "效果显示中" : "原桌面"
@@ -494,6 +609,7 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard self.stream === stream, type == .screen, sampleBuffer.isValid else { return }
         guard sleepReasons.isEmpty else { return }
+        guard !captureDormant else { return }
         guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let raw = attachments.first?[.status] as? Int,
               SCFrameStatus(rawValue: raw) == .complete,
@@ -502,6 +618,10 @@ final class GlobalDesktopController: NSObject, @preconcurrency SCStreamOutput, S
         recoveryFailures = 0
         receivedFrame = true
         frameCount += 1
+        if wakingDormantCapture {
+            wakingDormantCapture = false
+        }
+        if timer == nil && resumeWanted { resumeRendering() }
     }
 
     nonisolated func stream(_ stream: SCStream, didStopWithError error: Error) {

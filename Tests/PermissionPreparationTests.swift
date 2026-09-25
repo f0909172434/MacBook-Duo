@@ -27,6 +27,27 @@ import Foundation
         precondition(!E.canRenderRetainedWakeFrame(sleepReasons: ["system", "display"]))
         precondition(!E.canRenderRetainedWakeFrame(sleepReasons: ["system", "session"]))
         precondition(!E.canRenderRetainedWakeFrame(sleepReasons: ["system", "lock"]))
+        precondition(E.shouldEnterDormantCapture(remaining: 0, velocity: 0, settled: true,
+                                                 overlayVisible: false, previewActive: false,
+                                                 secondsSinceMotion: 1))
+        precondition(!E.shouldEnterDormantCapture(remaining: 0.1, velocity: 0, settled: true,
+                                                  overlayVisible: false, previewActive: false,
+                                                  secondsSinceMotion: 1))
+        precondition(!E.shouldEnterDormantCapture(remaining: 0, velocity: 5, settled: true,
+                                                  overlayVisible: false, previewActive: false,
+                                                  secondsSinceMotion: 1))
+        precondition(!E.shouldEnterDormantCapture(remaining: 0, velocity: 0, settled: false,
+                                                  overlayVisible: false, previewActive: false,
+                                                  secondsSinceMotion: 1))
+        precondition(!E.shouldEnterDormantCapture(remaining: 0, velocity: 0, settled: true,
+                                                  overlayVisible: true, previewActive: false,
+                                                  secondsSinceMotion: 1))
+        precondition(!E.shouldEnterDormantCapture(remaining: 0, velocity: 0, settled: true,
+                                                  overlayVisible: false, previewActive: true,
+                                                  secondsSinceMotion: 1))
+        precondition(!E.shouldEnterDormantCapture(remaining: 0, velocity: 0, settled: true,
+                                                  overlayVisible: false, previewActive: false,
+                                                  secondsSinceMotion: 0.1))
         precondition(E.retryDelay(failures: 1) == 0, "A first interruption must not add two seconds to wake recovery")
         precondition(E.retryDelay(failures: 0) == 0)
         precondition(E.retryDelay(failures: -1) == 0)
@@ -41,6 +62,6 @@ import Foundation
         // an interruption after that recovery is a first failure again.
         let failureSequence = [1, 2, 3, 1]
         precondition(failureSequence.map { E.retryDelay(failures: $0) } == [0, 4, 6, 0])
-        print("PASS: permission safety, angle boundaries, prediction, capture budget, retained-wake security, retry backoff")
+        print("PASS: permission safety, angle boundaries, prediction, capture budget, dormant capture, retained-wake security, retry backoff")
     }
 }
