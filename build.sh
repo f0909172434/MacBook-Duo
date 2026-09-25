@@ -27,7 +27,7 @@ swiftc \
   -o "$MACOS_DIR/HingeGlass" \
   "$PROJECT_DIR"/Sources/*.swift
 
-"$PROJECT_DIR/test.sh"
+zsh "$PROJECT_DIR/test.sh"
 codesign --force --deep --sign "${SIGNING_IDENTITY:--}" "$APP_DIR"
 codesign --verify --deep --strict "$APP_DIR"
 echo "Built: $APP_DIR"
