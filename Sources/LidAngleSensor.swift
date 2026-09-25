@@ -75,10 +75,9 @@ final class LidAngleSensor: ObservableObject {
         let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
         }
-        // Allow a little coalescing only while the renderer/capture path is
-        // already dormant. 20 Hz still bounds hinge-motion detection to one
-        // extra 50 ms polling interval in the power-saving state.
-        timer.tolerance = lowPowerPollingEnabled ? interval * 0.20 : 0
+        // Keep dormant motion detection predictable: 20 Hz reduces sensor
+        // wakeups by one third without adding timer coalescing on top.
+        timer.tolerance = 0
         self.timer = timer
         RunLoop.main.add(timer, forMode: .common)
     }
